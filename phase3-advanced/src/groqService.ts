@@ -1,5 +1,6 @@
 import Groq from 'groq-sdk';
 import { config } from './config.js';
+import { vectorDb } from './vectorDb.js';
 
 /**
  * Service to orchestrate interactions with the Groq API.
@@ -26,11 +27,23 @@ export class GroqService {
     try {
       console.log('🟢 [GROQ] Initiating API request...');
       
+      // Get the latest user query to perform Vector Search
+      const latestMessage = messages[messages.length - 1]?.content || "";
+      
+      // Perform Cosine Similarity Search
+      const relevantChunks = await vectorDb.search(latestMessage, 2);
+      
+      // Construct context string
+      let contextInjection = "";
+      if (relevantChunks.length > 0) {
+        contextInjection = `\n\nRELEVANT KNOWLEDGE BASE CONTEXT:\n` + relevantChunks.map(c => `- ${c.text}`).join('\n');
+      }
+
       // We explicitly inject our system prompt at the beginning of the history
       const fullMessages = [
         {
           role: 'system',
-          content: 'You are AetherAI, an elite software engineering assistant. Provide direct, highly detailed, technically accurate answers with clean markdown structures.'
+          content: 'You are AetherAI, an elite software engineering assistant. Provide direct, highly detailed, technically accurate answers with clean markdown structures.' + contextInjection
         },
         ...messages
       ] as any[];

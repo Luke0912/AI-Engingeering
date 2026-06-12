@@ -4,12 +4,18 @@ import { fileURLToPath } from 'url';
 import { config } from './config.js';
 import { GroqService } from './groqService.js';
 import { tokenBucketRateLimiter } from './rateLimiter.js';
+import { vectorDb } from './vectorDb.js';
+import { agentService } from './agentService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(express.json());
+
+// Initialize VectorDB asynchronously
+const kbPath = path.join(__dirname, '../knowledge_base');
+vectorDb.loadKnowledgeBase(kbPath).catch(console.error);
 
 // Serve the React visualizer directly from public folder
 app.use(express.static(path.join(__dirname, '../public')));
@@ -22,7 +28,7 @@ const aiService = new GroqService();
 // ============================================================
 app.post('/api/v1/chat/test', async (req: Request, res: Response): Promise<void> => {
   console.log('🧪 TEST endpoint hit');
-  
+
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache, no-transform',
@@ -30,17 +36,37 @@ app.post('/api/v1/chat/test', async (req: Request, res: Response): Promise<void>
     'X-Accel-Buffering': 'no',
   });
   res.flushHeaders();
-  
+
   const words = ['Hello', ' from', ' AetherAI!', ' Streaming', ' is', ' working', ' perfectly!'];
-  
+
   for (const word of words) {
     res.write(`data: ${JSON.stringify({ token: word })}\n\n`);
     await new Promise(resolve => setTimeout(resolve, 200));
   }
-  
+
   res.write('data: [DONE]\n\n');
   res.end();
   console.log('🧪 TEST endpoint completed successfully');
+});
+
+// ============================================================
+// PHASE 3: Agentic Tool Calling Endpoint (Non-Streaming)
+// ============================================================
+app.post('/api/v1/agent', tokenBucketRateLimiter, async (req: Request, res: Response): Promise<void> => {
+  const { prompt } = req.body;
+
+  if (!prompt || typeof prompt !== 'string') {
+    res.status(400).json({ success: false, error: 'Required field "prompt" is missing.' });
+    return;
+  }
+
+  try {
+    const answer = await agentService.runAgent(prompt);
+    res.json({ success: true, answer });
+  } catch (error: any) {
+    console.error('Agent error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // ============================================================
@@ -76,7 +102,7 @@ app.post('/api/v1/chat/stream', tokenBucketRateLimiter, async (req: Request, res
 
   // Step 2: Write SSE headers
   console.log('📤 [STEP 2] Writing SSE headers...');
-  
+
   // Default socket timeouts are fine for Groq.
 
   res.writeHead(200, {
@@ -103,7 +129,7 @@ app.post('/api/v1/chat/stream', tokenBucketRateLimiter, async (req: Request, res
 
     // Step 4: Start Gemini stream
     console.log('🤖 [STEP 4] Starting Groq stream...');
-    
+
     await aiService.chatStream(messages, (token) => {
       if (isConnectionClosed) return;
 
