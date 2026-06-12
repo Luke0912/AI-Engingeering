@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AetherAI Stream Visualizer</title>
+  
+  <!-- Google Fonts: Outfit & Space Grotesk -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+  
+  <!-- TailwindCSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Tailwind Custom Config -->
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Outfit', 'sans-serif'],
+            mono: ['Space Grotesk', 'monospace'],
+          },
+          colors: {
+            brand: {
+              50: '#f5f3ff',
+              100: '#ede9fe',
+              500: '#8b5cf6',
+              600: '#7c3aed',
+              700: '#6d28d9',
+              950: '#0c071e',
+            },
+            slate: {
+              950: '#030712',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- React & Babel CDNs -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    body {
+      background: radial-gradient(circle at top right, rgba(124, 58, 237, 0.08), transparent 40%),
+                  radial-gradient(circle at bottom left, rgba(139, 92, 246, 0.05), transparent 40%),
+                  #030712;
+      color: #f3f4f6;
+    }
+    .glass-card {
+      background: rgba(17, 24, 39, 0.7);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .custom-scrollbar::-webkit-scrollbar {
+      width: 6px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 99px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+      background: rgba(139, 92, 246, 0.3);
+    }
+    @keyframes pulse-slow {
+      0%, 100% { opacity: 0.3; }
+      50% { opacity: 0.7; }
+    }
+    .pulse-dot {
+      animation: pulse-slow 2s infinite ease-in-out;
+    }
+  </style>
+</head>
+<body class="font-sans antialiased min-h-screen flex flex-col">
+
+  <div id="root" class="flex-grow flex flex-col"></div>
+
+  <!-- React Code using Babel -->
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    function App() {
+      const [messages, setMessages] = useState([
+        {
+          id: 'welcome',
+          role: 'assistant',
+          content: "Hi, I am **AetherAI**! I've successfully initialized our low-latency content stream. Type a prompt below to see real-time HTTP streaming and active rate limits in action!"
+        }
+      ]);
+      const [input, setInput] = useState('');
+      const [isStreaming, setIsStreaming] = useState(false);
+      const [rateLimit, setRateLimit] = useState({ limit: 5, remaining: 5 });
+      const [metrics, setMetrics] = useState({ ttft: 0, totalTokens: 0, duration: 0 });
+      const [errorMsg, setErrorMsg] = useState(null);
+      const messageEndRef = useRef(null);
+
+      // Auto scroll to latest tokens as they yield
+      useEffect(() => {
+        messageEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, [messages, isStreaming]);
+
+      async function handleSendMessage() {
+        const userPrompt = input.trim();
+        // Enforce validations inside JS callback instead of disabling DOM elements
+        if (!userPrompt || isStreaming) {
+          return;
+        }
+
+        setInput('');
+        setErrorMsg(null);
+        setIsStreaming(true);
+
+        const userMessage = { id: Date.now().toString(), role: 'user', content: userPrompt };
+        const assistantMessageId = (Date.now() + 1).toString();
+        const assistantMessage = { id: assistantMessageId, role: 'assistant', content: '' };
+
+        setMessages((prev) => [...prev, userMessage, assistantMessage]);
+
+        let tokenCount = 0;
+        let hasTriggeredTtft = false;
+        const startTime = Date.now();
+
+        try {
+          const response = await fetch('/api/v1/chat/stream', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ prompt: userPrompt })
+          });
+
+          // 1. Capture Rate Limit headers
+          const limit = response.headers.get('X-RateLimit-Limit');
+          const remaining = response.headers.get('X-RateLimit-Remaining');
+          if (limit && remaining) {
+            setRateLimit({ limit: parseInt(limit), remaining: parseInt(remaining) });
+          }
+
+          // 2. Handle Rate Limit Shunt
+          if (response.status === 429) {
+            const errData = await response.json();
+            setErrorMsg(errData.message);
+            setMessages((prev) => prev.slice(0, -1)); // Remove empty assistant bubble
+            setIsStreaming(false);
+            return;
+          }
+
+          if (!response.ok) {
+            throw new Error(`Server returned status: ${response.status} ${response.statusText}`);
+          }
+
+          if (!response.body) {
+            throw new Error('Response body is null. Streaming is not supported by your environment.');
+          }
+
+          // 3. Initialize Browser stream reader
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder('utf-8');
+          let lineBuffer = '';
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            // Decode buffer chunk line-by-line to prevent packet fragmentation cuts
+            const textChunk = decoder.decode(value, { stream: true });
+            const lines = (lineBuffer + textChunk).split('\n');
+            lineBuffer = lines.pop() || ''; // Preserve incomplete trailing line
+
+            for (const line of lines) {
+              const cleanLine = line.trim();
+              
+              if (!cleanLine || cleanLine.startsWith(':')) continue; // skip sse comments
+              if (cleanLine === 'data: [DONE]') continue;
+
+              if (cleanLine.startsWith('data: ')) {
+                const jsonStr = cleanLine.slice(5).trim();
+                try {
+                  const parsed = JSON.parse(jsonStr);
+                  
+                  if (parsed.token) {
+                    tokenCount++;
+                    
+                    // Compute Time-to-First-Token (TTFT)
+                    if (!hasTriggeredTtft) {
+                      const ttftMs = Date.now() - startTime;
+                      setMetrics((m) => ({ ...m, ttft: ttftMs }));
+                      hasTriggeredTtft = true;
+                    }
+
+                    // Append stream token to message bubble
+                    setMessages((prev) =>
+                      prev.map((msg) =>
+                        msg.id === assistantMessageId
+                          ? { ...msg, content: msg.content + parsed.token }
+                          : msg
+                      )
+                    );
+                  } else if (parsed.error) {
+                    setErrorMsg(parsed.error);
+                  }
+                } catch (e) {
+                  // Ignore parsing anomalies of incomplete stream lines
+                }
+              }
+            }
+          }
+
+          const finalDuration = Date.now() - startTime;
+          setMetrics((m) => ({
+            ...m,
+            totalTokens: tokenCount,
+            duration: finalDuration
+          }));
+
+        } catch (error) {
+          console.error('❌ Stream capture crashed:', error);
+          setErrorMsg(`Error: ${error.message || 'A connection drop occurred while streaming.'}`);
+          // Fallback to clear the empty bubble
+          setMessages((prev) => prev.map(m => m.id === assistantMessageId && m.content === '' ? { ...m, content: '❌ Stream interrupted.' } : m));
+        } finally {
+          setIsStreaming(false);
+        }
+      }
+
+      return (
+        <div className="flex-grow flex flex-col max-w-6xl w-full mx-auto p-4 md:py-8">
+          
+          {/* Header Panel */}
+          <header className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 pb-6 border-b border-white/10">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-brand-600 to-indigo-500 flex items-center justify-center shadow-lg shadow-brand-500/20">
+                <span className="font-mono text-xl font-bold text-white">Æ</span>
+              </div>
+              <div>
+                <h1 className="text-2xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white via-indigo-200 to-brand-500">
+                  AetherAI Stream
+                </h1>
+                <p className="text-xs text-white/50 flex items-center gap-1.5 mt-0.5">
+                  <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 pulse-dot"></span>
+                  Gemini 2.5 Flash Response Pipeline Active
+                </p>
+              </div>
+            </div>
+
+            {/* Token-Bucket Telemetry */}
+            <div className="flex items-center gap-4">
+              <div className="glass-card px-4 py-2 rounded-xl text-sm flex items-center gap-3">
+                <span className="text-white/40">Rate Limit Bucket:</span>
+                <div className="flex items-center gap-1.5 font-mono">
+                  <span className={`font-bold ${rateLimit.remaining === 0 ? 'text-red-400' : 'text-indigo-400'}`}>
+                    {rateLimit.remaining}
+                  </span>
+                  <span className="text-white/20">/</span>
+                  <span className="text-white/60">{rateLimit.limit}</span>
+                </div>
+                {/* Visual token slots */}
+                <div className="flex gap-1">
+                  {Array.from({ length: rateLimit.limit }).map((_, idx) => (
+                    <div
+                      key={idx}
+                      className={`h-3 w-1.5 rounded-sm transition-all duration-300 ${
+                        idx < rateLimit.remaining ? 'bg-indigo-500 shadow-sm shadow-indigo-500/30' : 'bg-white/10'
+                      }`}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+          </header>
+
+          {/* Interactive Metrics Bar */}
+          <div className="grid grid-cols-3 gap-4 my-6">
+            <div className="glass-card p-3 rounded-2xl flex flex-col justify-center">
+              <span className="text-xs text-white/40 font-medium">Time-To-First-Token</span>
+              <span className="text-xl font-bold font-mono text-emerald-400 mt-1">{metrics.ttft}ms</span>
+            </div>
+            <div className="glass-card p-3 rounded-2xl flex flex-col justify-center">
+              <span className="text-xs text-white/40 font-medium">Generation Speed</span>
+              <span className="text-xl font-bold font-mono text-indigo-400 mt-1">
+                {metrics.duration > 0 ? Math.round((metrics.totalTokens / (metrics.duration / 1000))) : 0} t/s
+              </span>
+            </div>
+            <div className="glass-card p-3 rounded-2xl flex flex-col justify-center">
+              <span className="text-xs text-white/40 font-medium">Total Stream Tokens</span>
+              <span className="text-xl font-bold font-mono text-white mt-1">{metrics.totalTokens}</span>
+            </div>
+          </div>
+
+          {/* Chat Container */}
+          <main className="flex-grow flex flex-col glass-card rounded-3xl overflow-hidden shadow-2xl relative">
+            
+            {/* Scrollable messages viewport */}
+            <div className="flex-grow overflow-y-auto p-6 space-y-6 custom-scrollbar max-h-[60vh] md:max-h-[50vh]">
+              {messages.map((msg, idx) => (
+                <div
+                  key={msg.id || idx}
+                  className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
+                >
+                  <span className="text-[10px] text-white/30 font-medium mb-1 font-mono uppercase tracking-wider">
+                    {msg.role}
+                  </span>
+                  <div
+                    className={`max-w-[85%] rounded-2xl px-5 py-3.5 leading-relaxed text-sm ${
+                      msg.role === 'user'
+                        ? 'bg-gradient-to-tr from-brand-600 to-indigo-500 text-white shadow-lg shadow-brand-500/10 rounded-tr-none'
+                        : 'bg-white/5 border border-white/5 text-gray-200 rounded-tl-none'
+                    }`}
+                  >
+                    {/* Basic Markdown parsing mapping newlines and bold weights */}
+                    {msg.content.split('\n').map((line, lIdx) => (
+                      <p key={lIdx} className={lIdx > 0 ? 'mt-2' : ''}>
+                        {line.split('**').map((part, pIdx) => 
+                          pIdx % 2 === 1 ? <strong key={pIdx} className="text-brand-300 font-semibold">{part}</strong> : part
+                        )}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              
+              {isStreaming && (
+                <div className="flex items-center gap-1.5 text-indigo-400 font-mono text-xs pl-2">
+                  <span className="h-2.5 w-2.5 rounded-full bg-indigo-500 pulse-dot"></span>
+                  <span>AetherAI is generating thoughts...</span>
+                </div>
+              )}
+
+              {messageEndRef.current && <div ref={messageEndRef} />}
+            </div>
+
+            {/* Error Notification Banner */}
+            {errorMsg && (
+              <div className="absolute bottom-24 left-6 right-6 bg-red-950/80 border border-red-500/20 px-4 py-3 rounded-2xl text-xs text-red-300 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="h-1.5 w-1.5 rounded-full bg-red-400"></span>
+                  <span>{errorMsg}</span>
+                </div>
+                <button
+                  onClick={() => setErrorMsg(null)}
+                  className="text-white/40 hover:text-white font-mono hover:scale-105"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            {/* Chat Input Bar - NO <form> element to prevent browser default submit/reload */}
+            <div className="p-6 border-t border-white/5 bg-slate-950/40">
+              <div className="flex items-center gap-3">
+                <input
+                  type="text"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSendMessage(); } }}
+                  placeholder={isStreaming ? "AetherAI is responding..." : "Ask your software engineering prompt..."}
+                  className="flex-grow glass-card bg-slate-950/60 border border-white/10 px-5 py-3.5 rounded-2xl text-sm focus:outline-none focus:border-brand-500 transition-colors placeholder-white/30 text-white"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleSendMessage()}
+                  className="h-12 w-12 rounded-2xl bg-gradient-to-tr from-brand-600 to-indigo-500 hover:from-brand-700 hover:to-indigo-600 flex items-center justify-center text-white transition-all active:scale-95 shadow-lg shadow-brand-500/10"
+                >
+                  <svg className="h-5 w-5 rotate-90" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 19l9-7-9-7V5l12 7-12 7v-5z" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </main>
+          
+          <footer className="mt-6 text-center text-xs text-white/20">
+            AetherAI Stream Console © 2026 — Built on Server-Sent Events & Token-Bucket Middleware.
+          </footer>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
